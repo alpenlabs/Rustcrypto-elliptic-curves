@@ -60,6 +60,35 @@ impl VerifyingKey {
                 .finalize(),
         );
 
+        #[cfg(all(target_os = "zkvm", target_vendor = "succinct"))]
+        {
+            use elliptic_curve::sec1::ToEncodedPoint;
+            use sp1_lib::{
+                secp256k1::Secp256k1Point as Sp1Secp256k1Point,
+                unconstrained,
+                utils::{AffinePoint as SP1AffinePoint, WeierstrassAffinePoint},
+            };
+
+            let s_bits = be_bytes_to_le_bits(s.to_bytes().as_ref());
+            let neg_e_bits = be_bytes_to_le_bits(e.negate().to_bytes().as_ref());
+
+            let encoded_pk = self.inner.to_encoded_point(false);
+            let pk =
+                <Sp1Secp256k1Point as SP1AffinePoint<16>>::from_le_bytes(encoded_pk.as_bytes());
+            let generator = Sp1Secp256k1Point::new(Sp1Secp256k1Point::GENERATOR);
+
+            let R =
+                Sp1Secp256k1Point::multi_scalar_multiplication(&s_bits, generator, &neg_e_bits, pk);
+            let r_bytes = R.to_le_bytes();
+
+            if R.is_infinity() || r_bytes[32] % 2 == 0 || &r_bytes[0..32] != &r.to_bytes().to_vec()
+            {
+                return Err(Error::new());
+            }
+
+            return Ok(());
+        }
+
         let R = ProjectivePoint::lincomb(
             &ProjectivePoint::GENERATOR,
             s,
@@ -180,4 +209,21 @@ impl<'de> Deserialize<'de> for VerifyingKey {
     {
         VerifyingKey::try_from(PublicKey::deserialize(deserializer)?).map_err(de::Error::custom)
     }
+}
+
+/// Convert big-endian bytes with the most significant bit first to little-endian bytes with the least significant bit first.
+///
+/// [Ref](https://github.com/RustCrypto/signatures/compare/master...sp1-patches:signatures:ratan/patch-0.16.9-sp1-4.0.0-rc.3-v2#diff-9ca62a3b6caabf24ac0e8fc2b6e94dade6cd93dda5d0cb95a36f1ba9b7516d41R529-R542)
+#[inline]
+#[cfg(all(target_os = "zkvm", target_vendor = "succinct"))]
+fn be_bytes_to_le_bits(be_bytes: &[u8; 32]) -> [bool; 256] {
+    let mut bits = [false; 256];
+    // Reverse the byte order to little-endian.
+    for (i, &byte) in be_bytes.iter().rev().enumerate() {
+        for j in 0..8 {
+            // Flip the bit order so the least significant bit is now the first bit of the chunk.
+            bits[i * 8 + j] = ((byte >> j) & 1) == 1;
+        }
+    }
+    bits
 }
